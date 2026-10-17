@@ -1,0 +1,1152 @@
+{
+  "name": "Contract Clause Risk Flagger",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "contract-clause-risk-flagger",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "b0987b8d-7211-4d60-82f4-63e69fb9f414",
+      "name": "01 — Contract Upload Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        16,
+        -2384
+      ],
+      "webhookId": "6cf6b243-dae2-40af-b2e0-26bc4045d299",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "XnmYWeORcBEH3nSJ",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const inputItems = $input.all();\n\nfunction getHeader(headers, headerName) {\n  const matchedHeader = Object.entries(headers).find(\n    ([key]) => key.toLowerCase() === headerName.toLowerCase()\n  );\n\n  return matchedHeader?.[1];\n}\n\nfunction getClientIp(headers) {\n  const forwardedFor = getHeader(headers, 'x-forwarded-for');\n\n  if (typeof forwardedFor === 'string' && forwardedFor.trim()) {\n    return forwardedFor.split(',')[0].trim();\n  }\n\n  return getHeader(headers, 'x-real-ip') ?? 'unknown';\n}\n\nreturn inputItems.map((item, index) => {\n  const headers = item.json?.headers ?? {};\n  const suppliedRequestId = getHeader(headers, 'x-request-id');\n\n  const requestId =\n    typeof suppliedRequestId === 'string' && suppliedRequestId.trim()\n      ? suppliedRequestId.trim()\n      : `ccrf_${Date.now()}_${index}_${Math.random()\n          .toString(36)\n          .slice(2, 10)}`;\n\n  item.json.securityContext = {\n    authenticated: true,\n    authenticationMethod: 'webhook-header-auth',\n    requestId,\n    requesterIp: getClientIp(headers),\n    userAgent: getHeader(headers, 'user-agent') ?? 'unknown',\n    receivedAt: new Date().toISOString(),\n  };\n\n  return item;\n});"
+      },
+      "id": "1481fe24-24d9-426e-b613-537d679daf53",
+      "name": "02 — Authenticate Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        288,
+        -2384
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const inputItems = $input.all();\n\nconst ALLOWED_FILE_TYPES = {\n  pdf: ['application/pdf'],\n  docx: [\n    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',\n  ],\n  txt: ['text/plain'],\n};\n\nconst MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024; // 20 MB\n\nfunction getFileSizeInBytes(fileSize) {\n  if (typeof fileSize === 'number') return fileSize;\n  if (typeof fileSize !== 'string') return 0;\n\n  const match = fileSize.trim().match(/^([\\d.]+)\\s*(B|KB|MB|GB)?$/i);\n  if (!match) return 0;\n\n  const value = Number(match[1]);\n  const unit = (match[2] ?? 'B').toUpperCase();\n  const multipliers = {\n    B: 1,\n    KB: 1024,\n    MB: 1024 ** 2,\n    GB: 1024 ** 3,\n  };\n\n  return Math.round(value * multipliers[unit]);\n}\n\nreturn inputItems.map((item) => {\n  const binaryFiles = Object.entries(item.binary ?? {});\n\n  if (binaryFiles.length === 0) {\n    throw new Error('Validation failed: no contract file was uploaded.');\n  }\n\n  const selectedFile =\n    binaryFiles.find(([key]) => key === 'contractFile') ?? binaryFiles[0];\n\n  const [binaryPropertyName, file] = selectedFile;\n  const fileName = file.fileName ?? 'uploaded-contract';\n  const extension = fileName.split('.').pop()?.toLowerCase();\n  const mimeType = (file.mimeType ?? '').toLowerCase();\n  const fileSizeBytes = getFileSizeInBytes(file.fileSize ?? file.size);\n\n  if (!extension || !ALLOWED_FILE_TYPES[extension]) {\n    throw new Error(\n      'Validation failed: only PDF, DOCX, and TXT contract files are accepted.'\n    );\n  }\n\n  if (!ALLOWED_FILE_TYPES[extension].includes(mimeType)) {\n    throw new Error(\n      `Validation failed: file extension .${extension} does not match MIME type ${mimeType || 'unknown'}.`\n    );\n  }\n\n  if (fileSizeBytes > MAX_FILE_SIZE_BYTES) {\n    throw new Error(\n      'Validation failed: the contract exceeds the 20 MB upload limit.'\n    );\n  }\n\n  item.json.document = {\n    binaryPropertyName,\n    fileName,\n    extension,\n    mimeType,\n    fileSizeBytes,\n  };\n\n  item.json.fileValidation = {\n    valid: true,\n    validatedAt: new Date().toISOString(),\n    acceptedTypes: ['pdf', 'docx', 'txt'],\n    maxFileSizeBytes: MAX_FILE_SIZE_BYTES,\n  };\n\n  return item;\n});"
+      },
+      "id": "57faf549-11ef-492b-9bfc-4d1bbe8c71c9",
+      "name": "03 — Validate Upload Metadata",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        560,
+        -2384
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "= https://www.virustotal.com/api/v3/files",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "file",
+              "inputDataFieldName": "contractFile"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "b1b5bff7-a8cb-4e07-85ea-a6664120408d",
+      "name": "04 — Virus Scan Gateway",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        912,
+        -2384
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "jPAc0wKo0g88DtDx",
+          "name": "Header Auth account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "inputDataFieldName": "contractFile",
+        "name": "={{ $json.document.fileName }}",
+        "driveId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "My Drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_DRIVE_FOLDER_ID",
+          "mode": "list",
+          "cachedResultName": "Contract Clause Risk Flagger",
+          "cachedResultUrl": "https://drive.google.com/drive/folders/YOUR_GOOGLE_DRIVE_FOLDER_ID"
+        },
+        "options": {}
+      },
+      "id": "89ef14e0-427c-48bd-aa52-593bdb289c0e",
+      "name": "05 — Store Original Contract",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        1552,
+        -2384
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "TPB55QiJJYL2wvAe",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const driveUploadItems = $input.all();\nconst preservedContractItems = $items(\n  '04B — Preserve Contract Context & Scan Result',\n  0,\n  0\n);\n\nconst FORMAT_RULES = {\n  pdf: {\n    mimeTypes: ['application/pdf'],\n    processingRoute: 'pdf-native-text-extraction',\n    requiresTextExtraction: true,\n    supportsOcrFallback: true,\n  },\n  docx: {\n    mimeTypes: [\n      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',\n    ],\n    processingRoute: 'docx-text-extraction',\n    requiresTextExtraction: true,\n    supportsOcrFallback: false,\n  },\n  txt: {\n    mimeTypes: ['text/plain'],\n    processingRoute: 'direct-text-processing',\n    requiresTextExtraction: false,\n    supportsOcrFallback: false,\n  },\n};\n\nif (preservedContractItems.length === 0) {\n  throw new Error(\n    'Format detection failed: preserved contract context from Node 04B is missing.'\n  );\n}\n\nreturn driveUploadItems.map((driveUploadItem, index) => {\n  const preservedContractItem =\n    preservedContractItems[index] ?? preservedContractItems[0];\n\n  const document = preservedContractItem.json?.document;\n  const binaryPropertyName = document?.binaryPropertyName ?? 'contractFile';\n  const binaryFile = preservedContractItem.binary?.[binaryPropertyName];\n\n  if (!document || !binaryFile) {\n    throw new Error(\n      'Format detection failed: original document metadata or binary file is missing.'\n    );\n  }\n\n  const extension = String(\n    document.extension ?? binaryFile.fileExtension ?? ''\n  ).toLowerCase();\n\n  const mimeType = String(\n    document.mimeType ?? binaryFile.mimeType ?? ''\n  ).toLowerCase();\n\n  const formatRule = FORMAT_RULES[extension];\n\n  if (!formatRule || !formatRule.mimeTypes.includes(mimeType)) {\n    throw new Error(\n      `Unsupported or mismatched document format: .${extension} / ${mimeType}.`\n    );\n  }\n\n  return {\n    json: {\n      ...preservedContractItem.json,\n\n      storage: {\n        provider: 'google-drive',\n        fileId: driveUploadItem.json?.id ?? null,\n        fileName: driveUploadItem.json?.name ?? document.fileName,\n        webViewLink: driveUploadItem.json?.webViewLink ?? null,\n        storedAt: new Date().toISOString(),\n      },\n\n      fileFormat: {\n        detectedFormat: extension,\n        mimeType,\n        binaryPropertyName,\n        processingRoute: formatRule.processingRoute,\n        requiresTextExtraction: formatRule.requiresTextExtraction,\n        supportsOcrFallback: formatRule.supportsOcrFallback,\n        scanStatus:\n          extension === 'pdf'\n            ? 'pending-native-text-check'\n            : 'not-applicable',\n        detectedAt: new Date().toISOString(),\n      },\n    },\n\n    binary: preservedContractItem.binary,\n  };\n});"
+      },
+      "id": "722d05d1-2e30-4631-b0b1-df4a6d904606",
+      "name": "06 — Detect File Format",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1888,
+        -2384
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.fileFormat?.pdfSecurity?.isPasswordProtected ?? false }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "id": "9430e992-821f-4422-b983-4a28b6a916c1"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "ccb39c47-fa95-4dd8-bc3b-8a46cb7a75f1",
+      "name": "07 — Is Password Protected?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2208,
+        -2384
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ {\n  status: 'rejected',\n  code: 'PASSWORD_PROTECTED_FILE',\n  requestId: $json.securityContext?.requestId ?? null,\n  message: 'This contract is password-protected and cannot be processed securely.',\n  requiredAction: 'Upload an unlocked PDF, DOCX, or TXT version of the contract.',\n  processedAt: new Date().toISOString()\n} }}",
+        "options": {
+          "responseCode": 422
+        }
+      },
+      "id": "9b40ccd6-abb1-48ae-8842-528503afce97",
+      "name": "08 — Request Unlocked File",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        2528,
+        -2400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const inputItems = $input.all();\n\nfunction createFingerprint(value) {\n  let hash = 2166136261;\n\n  for (let index = 0; index < value.length; index += 1) {\n    hash ^= value.charCodeAt(index);\n    hash = Math.imul(hash, 16777619);\n  }\n\n  return `fnv1a-${(hash >>> 0).toString(16).padStart(8, '0')}`;\n}\n\nfunction normalizeContractText(value) {\n  return value\n    .normalize('NFKC')\n    .replace(/\\u00A0/g, ' ')                // non-breaking spaces\n    .replace(/[\\u200B-\\u200D\\uFEFF]/g, '')  // invisible characters\n    .replace(/\\r\\n?/g, '\\n')\n    .replace(/([A-Za-z])-\\n([a-z])/g, '$1$2') // line-break hyphenation\n    .replace(/[ \\t]+\\n/g, '\\n')\n    .replace(/\\n[ \\t]+/g, '\\n')\n    .replace(/[ \\t]{2,}/g, ' ')\n    .replace(/\\n{3,}/g, '\\n\\n')\n    .replace(/^\\s+|\\s+$/g, '');\n}\n\nreturn inputItems.map((item) => {\n  const rawText = String(item.json?.extraction?.text ?? '');\n\n  if (!rawText.trim()) {\n    throw new Error(\n      'Text normalization failed: no extracted contract text is available.'\n    );\n  }\n\n  const normalizedText = normalizeContractText(rawText);\n  const wordCount = normalizedText\n    .split(/\\s+/)\n    .filter(Boolean).length;\n\n  if (wordCount < 20) {\n    throw new Error(\n      'Text normalization failed: extracted content is too short for reliable contract analysis.'\n    );\n  }\n\n  item.json.contractText = {\n    rawCharacterCount: rawText.length,\n    normalizedCharacterCount: normalizedText.length,\n    wordCount,\n    fingerprint: createFingerprint(normalizedText),\n    language: item.json?.fileFormat?.detectedFormat === 'txt'\n      ? 'unknown'\n      : 'pending-detection',\n    normalizedAt: new Date().toISOString(),\n  };\n\n  item.json.normalizedText = normalizedText;\n\n  return item;\n});"
+      },
+      "id": "b8d9c06f-dc85-4a84-896f-69337da3df3e",
+      "name": "12 — Normalize Contract Text",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        48,
+        -2064
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: \"openai/gpt-oss-20b\",\n  temperature: 0,\n  messages: [\n    {\n      role: \"system\",\n      content: `You are a contract language detection engine.\n\nAnalyze the contract text provided by the user.\n\nYou MUST detect the primary language from the actual contract text.\n\nIf the text is primarily English:\n- language = \"English\"\n- isEnglish = true\n\nIf the text is primarily another language:\n- language = the actual language name\n- isEnglish = false\n\nIf multiple languages are present, identify the dominant language.\n\nThe language field MUST NEVER be empty.\nThe language field MUST NEVER be null.\n\nReturn ONLY valid JSON.\n\nReturn exactly:\n\n{\n  \"language\": \"English\",\n  \"isEnglish\": true,\n  \"confidence\": 100\n}\n\nconfidence must be an integer from 0 to 100.`\n    },\n    {\n      role: \"user\",\n      content: String(\n        $('12 — Normalize Contract Text').item.json.normalizedText || \"\"\n      )\n    }\n  ],\n  response_format: {\n    type: \"json_object\"\n  },\n  stream: false,\n  include_reasoning: false\n}) }}",
+        "options": {}
+      },
+      "id": "33e979c7-373e-4631-b576-e7cd6290a756",
+      "name": "13 — Detect Contract Language",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        384,
+        -2064
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "CxU8lpDdEosdEu3Q",
+          "name": "Header Auth account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: \"openai/gpt-oss-20b\",\n  temperature: 0,\n  messages: [\n    {\n      role: \"system\",\n      content: `You are a professional legal contract translation engine.\n\nYour task is to translate the provided contract text into clear, accurate English.\n\nRules:\n1. Preserve the original legal meaning exactly.\n2. Do not summarize.\n3. Do not omit any clause, sentence, number, date, name, or legal term.\n4. Preserve the original contract structure as much as possible.\n5. Do not add explanations or commentary.\n6. Do not analyze legal risk.\n7. If the input is already English, return it unchanged.\n8. Output ONLY the translated contract text.\n\nThe translation must be suitable for downstream legal contract analysis.`\n    },\n    {\n      role: \"user\",\n      content: String(\n        $('12 — Normalize Contract Text').item.json.normalizedText || \"\"\n      )\n    }\n  ],\n  stream: false,\n  include_reasoning: false\n}) }}",
+        "options": {}
+      },
+      "id": "62e1f002-040d-4aaf-a00d-7217b6e725fc",
+      "name": "14 — Translate To English",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1360,
+        -2080
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "CxU8lpDdEosdEu3Q",
+          "name": "Header Auth account 3"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "2bb45cec-c60d-4709-bda5-5695523204c0",
+      "name": "15 — Choose Analysis Text",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        1696,
+        -2096
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const virusTotalItems = $input.all();\nconst originalContractItems = $items(\n  '03 — Validate Upload Metadata',\n  0,\n  0\n);\n\nif (originalContractItems.length === 0) {\n  throw new Error(\n    'Contract context recovery failed: Node 03 did not provide an input item.'\n  );\n}\n\nreturn virusTotalItems.map((virusTotalItem, index) => {\n  const originalContractItem =\n    originalContractItems[index] ?? originalContractItems[0];\n\n  const analysisId = virusTotalItem.json?.data?.id;\n\n  if (!analysisId) {\n    throw new Error(\n      'VirusTotal submission failed: the response does not include an analysis ID.'\n    );\n  }\n\n  if (!originalContractItem.binary?.contractFile) {\n    throw new Error(\n      'Contract context recovery failed: contractFile binary data is missing.'\n    );\n  }\n\n  return {\n    json: {\n      ...originalContractItem.json,\n\n      virusTotal: {\n        submissionStatus: 'queued',\n        analysisId,\n        analysisUrl:\n          virusTotalItem.json?.data?.links?.self ?? null,\n        submittedAt: new Date().toISOString(),\n      },\n    },\n\n    binary: originalContractItem.binary,\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1264,
+        -2384
+      ],
+      "id": "6374b29e-981d-4a32-bd5c-bf910a474e78",
+      "name": "04B — Preserve Contract Context & Scan Result"
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "binaryPropertyName": "contractFile",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        2512,
+        -2160
+      ],
+      "id": "6aee1e8e-d9a3-4634-a5b1-6fd3aa455da4",
+      "name": "09 — Extract Native Text"
+    },
+    {
+      "parameters": {
+        "jsCode": "const inputItems = $input.all();\nconst MINIMUM_NATIVE_TEXT_LENGTH = 120;\n\nreturn inputItems.map((item) => {\n  const extractedText = String(item.json?.text ?? '').trim();\n  const nativeTextLength = extractedText.length;\n  const requiresOcr = nativeTextLength < MINIMUM_NATIVE_TEXT_LENGTH;\n\n  item.json.extractionQuality = {\n    nativeTextLength,\n    minimumExpectedTextLength: MINIMUM_NATIVE_TEXT_LENGTH,\n    requiresOcr,\n    decision: requiresOcr ? 'ocr-required' : 'native-text-sufficient',\n    reason: requiresOcr\n      ? 'Native PDF extraction returned insufficient readable text.'\n      : 'Native PDF extraction returned sufficient readable text.',\n    assessedAt: new Date().toISOString(),\n  };\n\n  return item;\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2768,
+        -2384
+      ],
+      "id": "967e229e-7f2a-4800-a834-bff73431e526",
+      "name": "10 — OCR Fallback Decision"
+    },
+    {
+      "parameters": {
+        "jsCode": "const extractionItems = $input.all();\nconst originalFormatItems = $items('06 — Detect File Format', 0, 0);\n\nif (originalFormatItems.length === 0) {\n  throw new Error(\n    'Extraction consolidation failed: original document context is unavailable.'\n  );\n}\n\nreturn extractionItems.map((extractionItem, index) => {\n  const originalItem =\n    originalFormatItems[index] ?? originalFormatItems[0];\n\n  const extractedText = String(extractionItem.json?.text ?? '').trim();\n  const extractionQuality = extractionItem.json?.extractionQuality ?? {};\n\n  if (!originalItem.binary?.contractFile) {\n    throw new Error(\n      'Extraction consolidation failed: original contract binary is missing.'\n    );\n  }\n\n  return {\n    json: {\n      ...originalItem.json,\n\n      extraction: {\n        status: extractionQuality.requiresOcr\n          ? 'ocr-required'\n          : 'ready-for-normalization',\n\n        source: extractionQuality.requiresOcr\n          ? 'native-text-insufficient'\n          : 'native-pdf-text',\n\n        text: extractedText,\n        textLength: extractedText.length,\n        pageCount: extractionItem.json?.numpages ?? null,\n        pdfMetadata: extractionItem.json?.info ?? {},\n        quality: extractionQuality,\n        consolidatedAt: new Date().toISOString(),\n      },\n    },\n\n    binary: originalItem.binary,\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3168,
+        -2384
+      ],
+      "id": "d080ed28-4742-4969-bfdd-d1ba5294698d",
+      "name": "11 — Consolidate Extraction Result"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nreturn items.map((item) => {\n  const rawContent = item.json?.choices?.[0]?.message?.content ?? \"\";\n\n  let parsed;\n\n  try {\n    if (typeof rawContent === \"string\") {\n      parsed = JSON.parse(rawContent);\n    } else {\n      parsed = rawContent;\n    }\n  } catch (error) {\n    throw new Error(\n      `Language detection JSON parsing failed. Received: ${rawContent}`\n    );\n  }\n\n  const language = String(parsed?.language ?? \"\").trim();\n\n  const isEnglish =\n    parsed?.isEnglish === true ||\n    String(parsed?.isEnglish ?? \"\").toLowerCase() === \"true\";\n\n  const confidence = Number(parsed?.confidence ?? 0);\n\n  return {\n    json: {\n      ...item.json,\n\n      detectedLanguage: language,\n      isEnglish: isEnglish,\n      languageConfidence: confidence,\n\n      languageDetection: {\n        language: language,\n        isEnglish: isEnglish,\n        confidence: confidence\n      }\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        -2064
+      ],
+      "id": "c2319932-ecc4-4712-9439-93b81f942035",
+      "name": "13B — Parse Language Result"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "2c389011-eeed-4ad4-a6e7-053ad4ed6e3b",
+              "leftValue": "={{ $json.languageDetection.isEnglish }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1024,
+        -2064
+      ],
+      "id": "89c38d63-d98c-41a5-b667-5e422d13d32e",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: \"openai/gpt-oss-20b\",\n  temperature: 0,\n  messages: [\n    {\n      role: \"system\",\n      content: `You are an advanced contract intelligence and legal-document metadata extraction engine.\n\nYour task is to extract structured metadata from the provided contract text.\n\nExtract the following:\n\n1. Contract type\n2. All identifiable parties and their roles\n3. Important dates, deadlines, payment periods, renewal periods, and notice periods\n4. Governing law\n5. Jurisdiction / dispute forum\n\nRules:\n- Analyze only the supplied contract text.\n- Do not invent information.\n- If information is not explicitly available, use an empty string or empty array.\n- Preserve party names exactly as written.\n- Preserve dates and time periods exactly as written.\n- Do not analyze legal risk.\n- Do not summarize the contract.\n- Return ONLY valid JSON.\n- Do not use Markdown.\n- Do not use code fences.\n\nReturn EXACTLY this structure:\n\n{\n  \"contractType\": \"\",\n  \"parties\": [\n    {\n      \"name\": \"\",\n      \"role\": \"\"\n    }\n  ],\n  \"dates\": [\n    {\n      \"type\": \"\",\n      \"date\": \"\"\n    }\n  ],\n  \"jurisdiction\": {\n    \"governingLaw\": \"\",\n    \"jurisdiction\": \"\"\n  }\n}`\n    },\n    {\n      role: \"user\",\n      content: String(\n        $('15 — Choose Analysis Text').item.json.choices?.[0]?.message?.content || \"\"\n      )\n    }\n  ],\n  response_format: {\n    type: \"json_object\"\n  },\n  stream: false,\n  include_reasoning: false\n}) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        2112,
+        -2096
+      ],
+      "id": "032aeb2e-e331-478c-988b-cb29d52a88c3",
+      "name": "16-Contract Metadata Analysis",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "CxU8lpDdEosdEu3Q",
+          "name": "Header Auth account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * NODE 17 — Parse Contract Metadata\n * Production-grade metadata parser and normalization layer\n */\n\n// =========================================================\n// 1. READ NODE 16 GEMINI RESPONSE\n// =========================================================\n\nconst geminiResponse = $json;\n\nconst rawContent =\n  geminiResponse?.choices?.[0]?.message?.content;\n\nif (!rawContent) {\n  throw new Error(\n    'Node 16 did not return choices[0].message.content.'\n  );\n}\n\n// =========================================================\n// 2. CLEAN GEMINI RESPONSE\n// =========================================================\n\nlet cleanedContent = String(rawContent).trim();\n\n// Remove accidental Markdown code fences\ncleanedContent = cleanedContent\n  .replace(/^```json\\s*/i, '')\n  .replace(/^```\\s*/i, '')\n  .replace(/\\s*```$/i, '')\n  .trim();\n\n// =========================================================\n// 3. PARSE JSON SAFELY\n// =========================================================\n\nlet metadata;\n\ntry {\n  metadata = JSON.parse(cleanedContent);\n} catch (error) {\n\n  // Recovery attempt if Gemini added unwanted text\n  const firstBrace = cleanedContent.indexOf('{');\n  const lastBrace = cleanedContent.lastIndexOf('}');\n\n  if (firstBrace === -1 || lastBrace === -1) {\n    throw new Error(\n      `Node 16 returned invalid JSON.\\n\\nRaw response:\\n${cleanedContent}`\n    );\n  }\n\n  const extractedJson = cleanedContent.slice(\n    firstBrace,\n    lastBrace + 1\n  );\n\n  try {\n    metadata = JSON.parse(extractedJson);\n  } catch (parseError) {\n    throw new Error(\n      `Failed to parse Node 16 response as JSON.\\n\\n` +\n      `Parser error: ${parseError.message}\\n\\n` +\n      `Raw response:\\n${cleanedContent}`\n    );\n  }\n}\n\n// =========================================================\n// 4. NORMALIZE CONTRACT TYPE\n// =========================================================\n\nconst contractType =\n  typeof metadata?.contractType === 'string' &&\n  metadata.contractType.trim()\n    ? metadata.contractType.trim()\n    : 'Unknown';\n\n// =========================================================\n// 5. NORMALIZE PARTIES\n// =========================================================\n\nconst parties = Array.isArray(metadata?.parties)\n  ? metadata.parties\n      .filter(p =>\n        p &&\n        typeof p === 'object' &&\n        typeof p.name === 'string' &&\n        p.name.trim()\n      )\n      .map(p => ({\n        name: p.name.trim(),\n        role:\n          typeof p.role === 'string'\n            ? p.role.trim()\n            : ''\n      }))\n  : [];\n\n// =========================================================\n// 6. NORMALIZE DATES\n// =========================================================\n\nconst dates = Array.isArray(metadata?.dates)\n  ? metadata.dates\n      .filter(d =>\n        d &&\n        typeof d === 'object'\n      )\n      .map(d => ({\n        type:\n          typeof d.type === 'string'\n            ? d.type.trim()\n            : '',\n        date:\n          typeof d.date === 'string'\n            ? d.date.trim()\n            : ''\n      }))\n      .filter(d => d.type || d.date)\n  : [];\n\n// =========================================================\n// 7. NORMALIZE JURISDICTION\n// =========================================================\n\nconst jurisdiction =\n  metadata?.jurisdiction &&\n  typeof metadata.jurisdiction === 'object'\n    ? {\n        governingLaw:\n          typeof metadata.jurisdiction.governingLaw === 'string'\n            ? metadata.jurisdiction.governingLaw.trim()\n            : '',\n\n        jurisdiction:\n          typeof metadata.jurisdiction.jurisdiction === 'string'\n            ? metadata.jurisdiction.jurisdiction.trim()\n            : ''\n      }\n    : {\n        governingLaw: '',\n        jurisdiction: ''\n      };\n\n// =========================================================\n// 8. GET ORIGINAL CONTRACT TEXT FROM NODE 15\n// =========================================================\n\nconst contractText =\n  $('15 — Choose Analysis Text')\n    .item\n    .json\n    ?.choices?.[0]\n    ?.message\n    ?.content || '';\n\nif (!contractText.trim()) {\n  throw new Error(\n    'Original contract text could not be retrieved from Node 15 — Choose Analysis Text.'\n  );\n}\n\n// =========================================================\n// 9. BASIC DATA QUALITY CHECK\n// =========================================================\n\nconst dataQuality = {\n  hasContractType: contractType !== 'Unknown',\n  partyCount: parties.length,\n  dateCount: dates.length,\n  hasGoverningLaw: Boolean(jurisdiction.governingLaw),\n  hasJurisdiction: Boolean(jurisdiction.jurisdiction)\n};\n\n// =========================================================\n// 10. FINAL NORMALIZED OUTPUT\n// =========================================================\n\nreturn [\n  {\n    json: {\n      contractType,\n\n      parties,\n\n      dates,\n\n      jurisdiction,\n\n      contractText,\n\n      dataQuality,\n\n      metadataExtraction: {\n        source: 'Gemini',\n        status: 'success',\n        parsed: true,\n        parserVersion: '1.0',\n        extractedAt: new Date().toISOString()\n      }\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        48,
+        -1808
+      ],
+      "id": "19ebe2f3-d2e2-475b-af1f-f5639a8512ff",
+      "name": "17 — Parse Contract Metadata"
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * NODE 18 — Contract Clause Segmentation Engine\n *\n * Purpose:\n * - Segment the normalized contract into analyzable clauses\n * - Preserve section numbers and headings\n * - Handle numbered, lettered and unnumbered sections\n * - Avoid creating meaningless fragments\n * - Preserve all metadata from Node 17\n */\n\n// =========================================================\n// 1. INPUT VALIDATION\n// =========================================================\n\nconst input = $input.first().json;\n\nconst contractText = String(input.contractText || '').trim();\n\nif (!contractText) {\n  throw new Error(\n    'Node 18: contractText is missing from Node 17.'\n  );\n}\n\n// =========================================================\n// 2. NORMALIZE TEXT\n// =========================================================\n\nconst normalizedText = contractText\n  .replace(/\\r\\n/g, '\\n')\n  .replace(/\\r/g, '\\n')\n  .replace(/[ \\t]+/g, ' ')\n  .replace(/\\n{3,}/g, '\\n\\n')\n  .trim();\n\n// =========================================================\n// 3. REMOVE NON-CONTRACT TEST HEADER WHEN PRESENT\n// =========================================================\n\nconst lines = normalizedText\n  .split('\\n')\n  .map(line => line.trim())\n  .filter(Boolean);\n\n// =========================================================\n// 4. SECTION DETECTION\n// =========================================================\n//\n// Supports patterns such as:\n//\n// 1. Services\n// 2. Fees and Payment\n// 3. Term and Automatic Renewal\n//\n// Also supports:\n//\n// 1 Services\n// 1) Services\n// 1 - Services\n// ARTICLE 1\n// SECTION 1\n// A. Confidentiality\n//\n// =========================================================\n\nconst sectionPattern =\n  /^(?:(?:SECTION|ARTICLE)\\s+)?(\\d+(?:\\.\\d+)*|[A-Z])[\\.\\):\\-]\\s*(.+)$/i;\n\nconst detectedSections = [];\n\nlet currentSection = null;\n\nfor (const line of lines) {\n\n  const match = line.match(sectionPattern);\n\n  if (match) {\n\n    // Save previous section\n    if (currentSection) {\n      detectedSections.push(currentSection);\n    }\n\n    currentSection = {\n      sectionNumber: match[1],\n      heading: match[2].trim(),\n      lines: []\n    };\n\n  } else if (currentSection) {\n\n    currentSection.lines.push(line);\n\n  }\n}\n\n// Save final section\nif (currentSection) {\n  detectedSections.push(currentSection);\n}\n\n// =========================================================\n// 5. FALLBACK SEGMENTATION\n// =========================================================\n//\n// If no formal sections were detected, split the document\n// into logical paragraphs instead of returning one huge item.\n// =========================================================\n\nif (detectedSections.length === 0) {\n\n  const paragraphs = normalizedText\n    .split(/\\n\\s*\\n/)\n    .map(p => p.trim())\n    .filter(p => p.length > 40);\n\n  if (paragraphs.length === 0) {\n    throw new Error(\n      'Node 18: Unable to identify contract clauses or meaningful paragraphs.'\n    );\n  }\n\n  return paragraphs.map((paragraph, index) => ({\n    json: {\n      ...input,\n\n      clause: {\n        clauseId: `CL-${String(index + 1).padStart(3, '0')}`,\n        sectionNumber: '',\n        heading: `Clause ${index + 1}`,\n        text: paragraph,\n        characterCount: paragraph.length,\n        wordCount: paragraph.split(/\\s+/).length\n      },\n\n      segmentation: {\n        method: 'paragraph-fallback',\n        totalClauses: paragraphs.length\n      }\n    }\n  }));\n}\n\n// =========================================================\n// 6. BUILD STRUCTURED CLAUSES\n// =========================================================\n\nconst clauses = detectedSections\n  .map((section, index) => {\n\n    const body = section.lines.join(' ').trim();\n\n    const fullText = body\n      ? `${section.sectionNumber}. ${section.heading}\\n${body}`\n      : `${section.sectionNumber}. ${section.heading}`;\n\n    return {\n      clauseId:\n        `CL-${String(index + 1).padStart(3, '0')}`,\n\n      sectionNumber:\n        section.sectionNumber,\n\n      heading:\n        section.heading,\n\n      text:\n        fullText.trim(),\n\n      characterCount:\n        fullText.length,\n\n      wordCount:\n        fullText.split(/\\s+/).filter(Boolean).length\n    };\n  })\n  .filter(clause => clause.text.length > 20);\n\n// =========================================================\n// 7. QUALITY CONTROL\n// =========================================================\n\nif (clauses.length === 0) {\n  throw new Error(\n    'Node 18: Clause segmentation produced zero usable clauses.'\n  );\n}\n\n// =========================================================\n// 8. RETURN ONE ITEM PER CLAUSE\n// =========================================================\n\nreturn clauses.map(clause => ({\n  json: {\n\n    // Preserve all metadata from Node 17\n    contractType: input.contractType,\n    parties: input.parties,\n    dates: input.dates,\n    jurisdiction: input.jurisdiction,\n    contractText: input.contractText,\n    dataQuality: input.dataQuality,\n    metadataExtraction: input.metadataExtraction,\n\n    // Current clause\n    clause,\n\n    // Processing information\n    segmentation: {\n      method: 'section-based',\n      totalClauses: clauses.length,\n      currentClauseIndex: clauses.indexOf(clause) + 1,\n      status: 'ready_for_risk_analysis'\n    }\n  }\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        304,
+        -1808
+      ],
+      "id": "a28eca74-0d00-4b84-aa9d-7c20fc224c28",
+      "name": "18 — Split Contract into Clauses"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: \"openai/gpt-oss-20b\",\n  temperature: 0,\n  messages: [\n    {\n      role: \"system\",\n      content: `Analyze every contract clause for risk.\n\nFor each clause return:\nclauseId, sectionNumber, heading,\nriskLevel, riskScore, riskCategory,\nissue, recommendation.\n\nriskLevel: LOW, MEDIUM, HIGH, CRITICAL.\nriskScore: 0-100.\nAnalyze every clause.\nBe concise.\nReturn only JSON.`\n    },\n    {\n      role: \"user\",\n      content: JSON.stringify({\n        contractMetadata: $json.contractMetadata,\n        clauses: $json.clauses\n      })\n    }\n  ],\n  stream: false,\n  include_reasoning: false,\n  response_format: {\n    type: \"json_schema\",\n    json_schema: {\n      name: \"clause_risk\",\n      strict: true,\n      schema: {\n        type: \"object\",\n        properties: {\n          analyses: {\n            type: \"array\",\n            items: {\n              type: \"object\",\n              properties: {\n                clauseId: { type: \"string\" },\n                sectionNumber: { type: \"string\" },\n                heading: { type: \"string\" },\n                riskLevel: {\n                  type: \"string\",\n                  enum: [\"LOW\", \"MEDIUM\", \"HIGH\", \"CRITICAL\"]\n                },\n                riskScore: {\n                  type: \"integer\",\n                  minimum: 0,\n                  maximum: 100\n                },\n                riskCategory: { type: \"string\" },\n                issue: { type: \"string\" },\n                recommendation: { type: \"string\" }\n              },\n              required: [\n                \"clauseId\",\n                \"sectionNumber\",\n                \"heading\",\n                \"riskLevel\",\n                \"riskScore\",\n                \"riskCategory\",\n                \"issue\",\n                \"recommendation\"\n              ],\n              additionalProperties: false\n            }\n          }\n        },\n        required: [\"analyses\"],\n        additionalProperties: false\n      }\n    }\n  }\n}) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        944,
+        -1808
+      ],
+      "id": "785c583c-0e0f-4af1-aaab-84f0093a6769",
+      "name": "19 — Clause Risk Analysis",
+      "retryOnFail": false,
+      "waitBetweenTries": 1500,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "CxU8lpDdEosdEu3Q",
+          "name": "Header Auth account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nreturn [\n  {\n    json: {\n      clauses: items.map(item => ({\n        clauseId: item.json.clause?.clauseId || \"\",\n        sectionNumber: item.json.clause?.sectionNumber || \"\",\n        heading: item.json.clause?.heading || \"\",\n        text: item.json.clause?.text || \"\"\n      })),\n\n      contractMetadata: {\n        contractType: items[0]?.json.contractType || \"\",\n        parties: items[0]?.json.parties || [],\n        dates: items[0]?.json.dates || [],\n        jurisdiction: items[0]?.json.jurisdiction || {}\n      }\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        624,
+        -1808
+      ],
+      "id": "a72ff548-394d-44b6-aa6e-37625fd9036c",
+      "name": "19A — Batch All Clauses"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nconst output = [];\n\nfor (const item of items) {\n  const rawContent = item.json?.choices?.[0]?.message?.content ?? \"\";\n\n  if (!rawContent) {\n    throw new Error(\"Node 19 returned empty AI content.\");\n  }\n\n  let parsed;\n\n  try {\n    parsed =\n      typeof rawContent === \"string\"\n        ? JSON.parse(rawContent)\n        : rawContent;\n  } catch (error) {\n    throw new Error(\n      `Failed to parse Node 19 JSON: ${rawContent}`\n    );\n  }\n\n  const analyses = Array.isArray(parsed?.analyses)\n    ? parsed.analyses\n    : [];\n\n  if (analyses.length === 0) {\n    throw new Error(\"No clause risk analyses found in Node 19 output.\");\n  }\n\n  for (const analysis of analyses) {\n    output.push({\n      json: {\n        clauseId: String(analysis.clauseId || \"\"),\n        sectionNumber: String(analysis.sectionNumber || \"\"),\n        heading: String(analysis.heading || \"\"),\n\n        riskLevel: String(analysis.riskLevel || \"LOW\"),\n\n        riskScore: Number(analysis.riskScore || 0),\n\n        riskCategory: String(\n          analysis.riskCategory || \"General\"\n        ),\n\n        issue: String(\n          analysis.issue || \"\"\n        ),\n\n        recommendation: String(\n          analysis.recommendation || \"\"\n        ),\n\n        riskAnalysisStatus: \"parsed\"\n      }\n    });\n  }\n}\n\nreturn output;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1264,
+        -1808
+      ],
+      "id": "36cc4cfc-2d09-453d-9a15-a5ac6ae94d4f",
+      "name": "20 — Parse Clause Risk Results"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nreturn items.map((item, index) => {\n  const data = item.json;\n\n  const riskScore = Math.max(\n    0,\n    Math.min(100, Number(data.riskScore || 0))\n  );\n\n  let priority;\n\n  if (riskScore >= 75) {\n    priority = \"CRITICAL\";\n  } else if (riskScore >= 50) {\n    priority = \"HIGH\";\n  } else if (riskScore >= 25) {\n    priority = \"MEDIUM\";\n  } else {\n    priority = \"LOW\";\n  }\n\n  return {\n    json: {\n      findingId: `F-${String(index + 1).padStart(3, \"0\")}`,\n\n      clauseId: data.clauseId || \"\",\n      sectionNumber: data.sectionNumber || \"\",\n      heading: data.heading || \"\",\n\n      risk: {\n        level: data.riskLevel || priority,\n        score: riskScore,\n        category: data.riskCategory || \"General\"\n      },\n\n      issue: data.issue || \"\",\n\n      recommendation: data.recommendation || \"\",\n\n      priority,\n\n      findingStatus: \"identified\"\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1584,
+        -1808
+      ],
+      "id": "7261e9f8-96ee-49c5-83bf-db1cfa37ff6c",
+      "name": "21 — Build Findings"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nif (items.length === 0) {\n  throw new Error(\"No findings received.\");\n}\n\nconst findings = items.map(item => item.json);\n\nconst counts = {\n  LOW: 0,\n  MEDIUM: 0,\n  HIGH: 0,\n  CRITICAL: 0\n};\n\nlet totalScore = 0;\nlet highestRisk = null;\n\nfor (const finding of findings) {\n  const level = String(\n    finding.risk?.level || \"LOW\"\n  ).toUpperCase();\n\n  const score = Math.max(\n    0,\n    Math.min(100, Number(finding.risk?.score || 0))\n  );\n\n  if (counts[level] !== undefined) {\n    counts[level]++;\n  }\n\n  totalScore += score;\n\n  if (\n    highestRisk === null ||\n    score > highestRisk.score\n  ) {\n    highestRisk = {\n      clauseId: finding.clauseId || \"\",\n      sectionNumber: finding.sectionNumber || \"\",\n      heading: finding.heading || \"\",\n      score,\n      level\n    };\n  }\n}\n\nconst averageScore = Number(\n  (totalScore / findings.length).toFixed(2)\n);\n\nreturn [\n  {\n    json: {\n      totalClausesAnalyzed: findings.length,\n\n      riskDistribution: counts,\n\n      totalRiskScore: totalScore,\n\n      averageRiskScore: averageScore,\n\n      highestRiskClause: highestRisk,\n\n      highRiskCount:\n        counts.HIGH + counts.CRITICAL,\n\n      criticalRiskCount:\n        counts.CRITICAL,\n\n      summaryStatus: \"aggregated\"\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1904,
+        -1808
+      ],
+      "id": "9a6b683d-6c1a-4a3c-b7c4-b3685a03c560",
+      "name": "22 — Aggregate Risk Summary"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nif (items.length === 0) {\n  throw new Error(\"No risk summary received.\");\n}\n\nconst summary = items[0].json;\n\nconst averageScore = Number(\n  summary.averageRiskScore || 0\n);\n\nconst criticalCount = Number(\n  summary.criticalRiskCount || 0\n);\n\nconst highRiskCount = Number(\n  summary.highRiskCount || 0\n);\n\nconst totalClauses = Number(\n  summary.totalClausesAnalyzed || 0\n);\n\nlet overallScore = averageScore;\n\n// Increase the overall score when serious findings exist.\nif (criticalCount > 0) {\n  overallScore += Math.min(15, criticalCount * 5);\n}\n\nif (highRiskCount > 0) {\n  overallScore += Math.min(10, highRiskCount * 2);\n}\n\noverallScore = Math.max(\n  0,\n  Math.min(100, Number(overallScore.toFixed(2)))\n);\n\nlet overallRiskLevel;\n\nif (overallScore >= 75) {\n  overallRiskLevel = \"CRITICAL\";\n} else if (overallScore >= 50) {\n  overallRiskLevel = \"HIGH\";\n} else if (overallScore >= 25) {\n  overallRiskLevel = \"MEDIUM\";\n} else {\n  overallRiskLevel = \"LOW\";\n}\n\nreturn [\n  {\n    json: {\n      ...summary,\n\n      overallRiskScore: overallScore,\n\n      overallRiskLevel,\n\n      riskAssessment: {\n        totalClauses: totalClauses,\n        averageScore,\n        highRiskCount,\n        criticalRiskCount: criticalCount,\n        overallScore,\n        overallRiskLevel\n      },\n\n      scoringMethod:\n        \"Average clause risk score adjusted for HIGH and CRITICAL findings\",\n\n      overallRiskStatus: \"calculated\"\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2272,
+        -1808
+      ],
+      "id": "71679892-58fd-4a7c-b0c0-8329d973d832",
+      "name": "23 — Calculate Overall Risk Score"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nif (items.length === 0) {\n  throw new Error(\"No overall risk assessment received.\");\n}\n\nconst data = items[0].json;\n\nconst distribution = data.riskDistribution || {};\n\nconst totalClauses = Number(\n  data.totalClausesAnalyzed || 0\n);\n\nconst overallScore = Number(\n  data.overallRiskScore || 0\n);\n\nconst overallLevel = String(\n  data.overallRiskLevel || \"LOW\"\n);\n\nconst highRiskCount = Number(\n  data.highRiskCount || 0\n);\n\nconst criticalRiskCount = Number(\n  data.criticalRiskCount || 0\n);\n\nconst highestRiskClause =\n  data.highestRiskClause || {};\n\nlet executiveSummary;\n\nif (overallLevel === \"CRITICAL\") {\n  executiveSummary =\n    \"The contract contains critical risk areas that require detailed review before approval or execution.\";\n} else if (overallLevel === \"HIGH\") {\n  executiveSummary =\n    \"The contract contains significant risk areas that should be reviewed and addressed before execution.\";\n} else if (overallLevel === \"MEDIUM\") {\n  executiveSummary =\n    \"The contract contains moderate risk areas that should be reviewed and clarified before execution.\";\n} else {\n  executiveSummary =\n    \"The contract contains relatively low identified risk based on the clause-level analysis.\";\n}\n\nreturn [\n  {\n    json: {\n      ...data,\n\n      executiveReport: {\n        title: \"Contract Clause Risk Assessment\",\n\n        executiveSummary,\n\n        overallAssessment: {\n          riskLevel: overallLevel,\n          riskScore: overallScore\n        },\n\n        clauseAnalysis: {\n          totalClausesAnalyzed: totalClauses,\n\n          riskDistribution: {\n            low: Number(distribution.LOW || 0),\n            medium: Number(distribution.MEDIUM || 0),\n            high: Number(distribution.HIGH || 0),\n            critical: Number(distribution.CRITICAL || 0)\n          },\n\n          highRiskCount,\n          criticalRiskCount\n        },\n\n        highestRiskArea: {\n          clauseId: highestRiskClause.clauseId || \"\",\n          sectionNumber:\n            highestRiskClause.sectionNumber || \"\",\n          heading:\n            highestRiskClause.heading || \"\",\n          riskLevel:\n            highestRiskClause.level || \"\",\n          riskScore:\n            Number(highestRiskClause.score || 0)\n        },\n\n        generatedAt: new Date().toISOString()\n      },\n\n      reportStatus: \"ready_for_html_generation\"\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2656,
+        -1808
+      ],
+      "id": "4a32bd5b-79e9-40b9-8ff0-559918fea7b3",
+      "name": "24: Build Executive Report"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nif (items.length === 0) {\n  throw new Error(\"No executive report received.\");\n}\n\nconst data = items[0].json;\nconst report = data.executiveReport || {};\n\nconst distribution = report.clauseAnalysis?.riskDistribution || {};\nconst overall = report.overallAssessment || {};\nconst highest = report.highestRiskArea || {};\n\nconst riskClass = String(\n  overall.riskLevel || \"LOW\"\n).toLowerCase();\n\nconst html = `\n<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n\n<title>Contract Clause Risk Assessment</title>\n\n<style>\n\nbody {\n  font-family: Arial, Helvetica, sans-serif;\n  background: #f4f6f8;\n  margin: 0;\n  padding: 40px;\n  color: #222;\n}\n\n.container {\n  max-width: 1000px;\n  margin: auto;\n  background: #ffffff;\n  padding: 40px;\n  border-radius: 12px;\n  box-shadow: 0 4px 20px rgba(0,0,0,0.08);\n}\n\nh1 {\n  margin-top: 0;\n  font-size: 30px;\n}\n\nh2 {\n  margin-top: 35px;\n  border-bottom: 1px solid #ddd;\n  padding-bottom: 10px;\n}\n\n.header {\n  display: flex;\n  justify-content: space-between;\n  align-items: center;\n  gap: 20px;\n}\n\n.badge {\n  padding: 10px 18px;\n  border-radius: 20px;\n  font-weight: bold;\n  text-transform: uppercase;\n  background: #eee;\n}\n\n.badge.critical {\n  background: #f8d7da;\n  color: #842029;\n}\n\n.badge.high {\n  background: #ffe5d0;\n  color: #9a3412;\n}\n\n.badge.medium {\n  background: #fff3cd;\n  color: #664d03;\n}\n\n.badge.low {\n  background: #d1e7dd;\n  color: #0f5132;\n}\n\n.summary {\n  background: #f8f9fa;\n  padding: 20px;\n  border-radius: 8px;\n  line-height: 1.6;\n}\n\n.metrics {\n  display: grid;\n  grid-template-columns: repeat(4, 1fr);\n  gap: 15px;\n  margin-top: 20px;\n}\n\n.metric {\n  padding: 20px;\n  background: #f8f9fa;\n  border-radius: 8px;\n  text-align: center;\n}\n\n.metric strong {\n  display: block;\n  font-size: 28px;\n  margin-bottom: 5px;\n}\n\ntable {\n  width: 100%;\n  border-collapse: collapse;\n  margin-top: 20px;\n}\n\nth,\ntd {\n  border: 1px solid #ddd;\n  padding: 12px;\n  text-align: left;\n}\n\nth {\n  background: #f1f3f5;\n}\n\n.highest {\n  background: #fff8f0;\n  border-left: 5px solid #dc3545;\n  padding: 20px;\n  margin-top: 20px;\n}\n\n.footer {\n  margin-top: 40px;\n  padding-top: 15px;\n  border-top: 1px solid #ddd;\n  color: #777;\n  font-size: 13px;\n}\n\n@media (max-width: 700px) {\n  body {\n    padding: 15px;\n  }\n\n  .container {\n    padding: 20px;\n  }\n\n  .metrics {\n    grid-template-columns: repeat(2, 1fr);\n  }\n\n  .header {\n    flex-direction: column;\n    align-items: flex-start;\n  }\n}\n\n</style>\n</head>\n\n<body>\n\n<div class=\"container\">\n\n  <div class=\"header\">\n    <div>\n      <h1>${report.title || \"Contract Clause Risk Assessment\"}</h1>\n      <p>Automated Contract Risk Analysis Report</p>\n    </div>\n\n    <div class=\"badge ${riskClass}\">\n      ${overall.riskLevel || \"LOW\"}\n    </div>\n  </div>\n\n  <h2>Executive Summary</h2>\n\n  <div class=\"summary\">\n    ${report.executiveSummary || \"\"}\n  </div>\n\n  <h2>Overall Risk Assessment</h2>\n\n  <div class=\"metrics\">\n\n    <div class=\"metric\">\n      <strong>${overall.riskScore ?? 0}</strong>\n      Overall Score\n    </div>\n\n    <div class=\"metric\">\n      <strong>${report.clauseAnalysis?.totalClausesAnalyzed ?? 0}</strong>\n      Clauses\n    </div>\n\n    <div class=\"metric\">\n      <strong>${report.clauseAnalysis?.highRiskCount ?? 0}</strong>\n      High Risk\n    </div>\n\n    <div class=\"metric\">\n      <strong>${report.clauseAnalysis?.criticalRiskCount ?? 0}</strong>\n      Critical\n    </div>\n\n  </div>\n\n  <h2>Risk Distribution</h2>\n\n  <table>\n    <thead>\n      <tr>\n        <th>Risk Level</th>\n        <th>Number of Clauses</th>\n      </tr>\n    </thead>\n\n    <tbody>\n      <tr>\n        <td>LOW</td>\n        <td>${distribution.low ?? 0}</td>\n      </tr>\n\n      <tr>\n        <td>MEDIUM</td>\n        <td>${distribution.medium ?? 0}</td>\n      </tr>\n\n      <tr>\n        <td>HIGH</td>\n        <td>${distribution.high ?? 0}</td>\n      </tr>\n\n      <tr>\n        <td>CRITICAL</td>\n        <td>${distribution.critical ?? 0}</td>\n      </tr>\n    </tbody>\n  </table>\n\n  <h2>Highest Risk Area</h2>\n\n  <div class=\"highest\">\n\n    <strong>\n      ${highest.clauseId || \"N/A\"}\n    </strong>\n\n    <p>\n      Section:\n      ${highest.sectionNumber || \"N/A\"}\n    </p>\n\n    <p>\n      Heading:\n      ${highest.heading || \"N/A\"}\n    </p>\n\n    <p>\n      Risk Level:\n      ${highest.riskLevel || \"N/A\"}\n    </p>\n\n    <p>\n      Risk Score:\n      ${highest.riskScore ?? 0}\n    </p>\n\n  </div>\n\n  <div class=\"footer\">\n    Generated automatically by Contract Clause Risk Flagger.\n    <br>\n    Generated at:\n    ${report.generatedAt || new Date().toISOString()}\n  </div>\n\n</div>\n\n</body>\n</html>\n`;\n\nreturn [\n  {\n    json: {\n      ...data,\n\n      htmlReport: html,\n\n      htmlLength: html.length,\n\n      reportFormat: \"HTML\",\n\n      reportStatus: \"html_generated\"\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3056,
+        -1808
+      ],
+      "id": "cb9c5455-61e6-4127-888c-611682debbfd",
+      "name": "25 — Generate HTML Report"
+    },
+    {
+      "parameters": {
+        "operation": "toText",
+        "sourceProperty": "htmlReport",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        3424,
+        -1808
+      ],
+      "id": "8142f9e7-467c-4348-8fd9-2e80e833c985",
+      "name": "Convert to File"
+    },
+    {
+      "parameters": {
+        "name": "contract-risk-report.html",
+        "driveId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "My Drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_DRIVE_FOLDER_ID",
+          "mode": "list",
+          "cachedResultName": "Contract Clause Risk Flagger",
+          "cachedResultUrl": "https://drive.google.com/drive/folders/YOUR_GOOGLE_DRIVE_FOLDER_ID"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        64,
+        -1472
+      ],
+      "id": "1743416e-d575-4698-b325-24f317913e63",
+      "name": "27 — Store Final Report to Google Drive",
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "TPB55QiJJYL2wvAe",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nif (items.length === 0) {\n  throw new Error(\"No report data received.\");\n}\n\nconst item = items[0].json;\n\nconst report = item.executiveReport || {};\nconst assessment = report.overallAssessment || {};\nconst clauseAnalysis = report.clauseAnalysis || {};\nconst highestRisk = report.highestRiskArea || {};\n\nreturn [\n  {\n    json: {\n      auditLog: {\n        event: \"CONTRACT_RISK_ANALYSIS_COMPLETED\",\n\n        timestamp: new Date().toISOString(),\n\n        reportType: \"Contract Clause Risk Assessment\",\n\n        totalClausesAnalyzed:\n          Number(clauseAnalysis.totalClausesAnalyzed || 0),\n\n        overallRiskLevel:\n          String(assessment.riskLevel || \"LOW\"),\n\n        overallRiskScore:\n          Number(assessment.riskScore || 0),\n\n        highRiskCount:\n          Number(clauseAnalysis.highRiskCount || 0),\n\n        criticalRiskCount:\n          Number(clauseAnalysis.criticalRiskCount || 0),\n\n        highestRiskClause: {\n          clauseId: highestRisk.clauseId || \"\",\n          sectionNumber: highestRisk.sectionNumber || \"\",\n          heading: highestRisk.heading || \"\",\n          riskLevel: highestRisk.riskLevel || \"\",\n          riskScore: Number(highestRisk.riskScore || 0)\n        },\n\n        reportStatus: \"completed\"\n      },\n\n      auditStatus: \"logged\"\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        304,
+        -1472
+      ],
+      "id": "7e571077-9349-4aaa-a8f4-add17022ea2e",
+      "name": "28 — Audit Log"
+    },
+    {
+      "parameters": {
+        "jsCode": "const audit = $input.first().json.auditLog || {};\n\nconst reportData =\n  $('25 — Generate HTML Report').first().json || {};\n\nconst report =\n  reportData.executiveReport || {};\n\nconst assessment =\n  report.overallAssessment || {};\n\nconst clauseAnalysis =\n  report.clauseAnalysis || {};\n\nconst highestRisk =\n  report.highestRiskArea || {};\n\nconst driveData =\n  $('27 — Store Final Report to Google Drive').first().json || {};\n\nreturn [\n  {\n    json: {\n      success: true,\n\n      message:\n        \"Contract risk analysis completed successfully.\",\n\n      report: {\n        title:\n          report.title ||\n          \"Contract Clause Risk Assessment\",\n\n        overallRiskLevel:\n          assessment.riskLevel || \"LOW\",\n\n        overallRiskScore:\n          Number(assessment.riskScore || 0),\n\n        totalClausesAnalyzed:\n          Number(clauseAnalysis.totalClausesAnalyzed || 0),\n\n        riskDistribution:\n          clauseAnalysis.riskDistribution || {},\n\n        highRiskCount:\n          Number(clauseAnalysis.highRiskCount || 0),\n\n        criticalRiskCount:\n          Number(clauseAnalysis.criticalRiskCount || 0),\n\n        highestRiskArea: {\n          clauseId:\n            highestRisk.clauseId || \"\",\n\n          sectionNumber:\n            highestRisk.sectionNumber || \"\",\n\n          heading:\n            highestRisk.heading || \"\",\n\n          riskLevel:\n            highestRisk.riskLevel || \"\",\n\n          riskScore:\n            Number(highestRisk.riskScore || 0)\n        }\n      },\n\n      audit: {\n        event:\n          audit.event || \"\",\n\n        timestamp:\n          audit.timestamp || \"\",\n\n        status:\n          audit.reportStatus || \"completed\"\n      },\n\n      reportFile: {\n        status: \"stored_in_google_drive\",\n        fileId:\n          driveData.id ||\n          driveData.fileId ||\n          \"\",\n        webViewLink:\n          driveData.webViewLink ||\n          \"\"\n      },\n\n      responseStatus: \"ready\"\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        592,
+        -1472
+      ],
+      "id": "6e4a33e4-a4eb-4a0a-b18a-103f283a57af",
+      "name": "29 — Prepare Final Response"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "29260398-7ed2-4d70-bc29-948050d98f5a",
+              "leftValue": "={{ String($json.report.overallRiskLevel).trim().toUpperCase() }}",
+              "rightValue": "CRITICAL",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        960,
+        -1472
+      ],
+      "id": "9607a2d1-28bf-4601-95b0-bf5c806f5f20",
+      "name": "30 — High Risk Alert"
+    },
+    {
+      "parameters": {
+        "sendTo": "YOUR_EMAIL_HERE",
+        "subject": "=🚨 Contract Risk Alert — {{ $json.report.overallRiskLevel }}",
+        "emailType": "text",
+        "message": "=Contract Risk Alert\n\nRisk Level: {{ $json.report.overallRiskLevel }}\nRisk Score: {{ $json.report.overallRiskScore }}\n\nTotal Clauses Analyzed: {{ $json.report.totalClausesAnalyzed }}\n\nHigh Risk Count: {{ $json.report.highRiskCount }}\nCritical Risk Count: {{ $json.report.criticalRiskCount }}\n\nHighest Risk Area:\nClause ID: {{ $json.report.highestRiskArea.clauseId }}\nSection: {{ $json.report.highestRiskArea.sectionNumber }}\nHeading: {{ $json.report.highestRiskArea.heading }}\nRisk Level: {{ $json.report.highestRiskArea.riskLevel }}\nRisk Score: {{ $json.report.highestRiskArea.riskScore }}\n\nPlease review the contract before execution.",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1296,
+        -1568
+      ],
+      "id": "298e2d21-6df7-4b13-8585-47b7fca35256",
+      "name": "31 — Send High Risk Alert",
+      "webhookId": "ac99fb68-8b07-4da0-8403-6d2e119e11e6",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "0Z3OvNUCKW0n3vFr",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const final = $('29 — Prepare Final Response').first().json;\n\nreturn [\n  {\n    json: {\n      success: final.success,\n      message: final.message,\n      report: final.report,\n      audit: final.audit,\n      reportFile: final.reportFile,\n      responseStatus: \"completed\",\n      alertEmailSent: true\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1520,
+        -1568
+      ],
+      "id": "6ef5b444-0d85-4cfa-b9ba-51f3e28752b8",
+      "name": "32 — Prepare Webhook Response"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1712,
+        -1568
+      ],
+      "id": "b27756fc-8894-4e45-99b6-82ca560534bc",
+      "name": "33 — Final Response"
+    },
+    {
+      "parameters": {
+        "jsCode": "const final = $('29 — Prepare Final Response').first().json;\n\nreturn [\n  {\n    json: {\n      success: final.success,\n\n      message:\n        \"Contract risk analysis completed successfully. No high or critical risk alert was triggered.\",\n\n      report: final.report,\n\n      audit: final.audit,\n\n      reportFile: final.reportFile,\n\n      responseStatus: \"completed\",\n\n      alertEmailSent: false\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1312,
+        -1376
+      ],
+      "id": "39124d55-357a-42ad-a7e3-9a6f6f83b343",
+      "name": "34 — Prepare Normal Response"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1536,
+        -1376
+      ],
+      "id": "ae77885a-233c-4eb9-accd-e26b0d79f316",
+      "name": "35 — Return Normal Analysis Response"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "01 — Contract Upload Webhook": {
+      "main": [
+        [
+          {
+            "node": "02 — Authenticate Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "02 — Authenticate Request": {
+      "main": [
+        [
+          {
+            "node": "03 — Validate Upload Metadata",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "03 — Validate Upload Metadata": {
+      "main": [
+        [
+          {
+            "node": "04 — Virus Scan Gateway",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "04 — Virus Scan Gateway": {
+      "main": [
+        [
+          {
+            "node": "04B — Preserve Contract Context & Scan Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "05 — Store Original Contract": {
+      "main": [
+        [
+          {
+            "node": "06 — Detect File Format",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "06 — Detect File Format": {
+      "main": [
+        [
+          {
+            "node": "07 — Is Password Protected?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "07 — Is Password Protected?": {
+      "main": [
+        [
+          {
+            "node": "08 — Request Unlocked File",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "09 — Extract Native Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "12 — Normalize Contract Text": {
+      "main": [
+        [
+          {
+            "node": "13 — Detect Contract Language",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "13 — Detect Contract Language": {
+      "main": [
+        [
+          {
+            "node": "13B — Parse Language Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "14 — Translate To English": {
+      "main": [
+        [
+          {
+            "node": "15 — Choose Analysis Text",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "15 — Choose Analysis Text": {
+      "main": [
+        [
+          {
+            "node": "16-Contract Metadata Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "04B — Preserve Contract Context & Scan Result": {
+      "main": [
+        [
+          {
+            "node": "05 — Store Original Contract",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "09 — Extract Native Text": {
+      "main": [
+        [
+          {
+            "node": "10 — OCR Fallback Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "10 — OCR Fallback Decision": {
+      "main": [
+        [
+          {
+            "node": "11 — Consolidate Extraction Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "11 — Consolidate Extraction Result": {
+      "main": [
+        [
+          {
+            "node": "12 — Normalize Contract Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "13B — Parse Language Result": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "14 — Translate To English",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "16-Contract Metadata Analysis": {
+      "main": [
+        [
+          {
+            "node": "17 — Parse Contract Metadata",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "17 — Parse Contract Metadata": {
+      "main": [
+        [
+          {
+            "node": "18 — Split Contract into Clauses",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "18 — Split Contract into Clauses": {
+      "main": [
+        [
+          {
+            "node": "19A — Batch All Clauses",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "19A — Batch All Clauses": {
+      "main": [
+        [
+          {
+            "node": "19 — Clause Risk Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "19 — Clause Risk Analysis": {
+      "main": [
+        [
+          {
+            "node": "20 — Parse Clause Risk Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "20 — Parse Clause Risk Results": {
+      "main": [
+        [
+          {
+            "node": "21 — Build Findings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "21 — Build Findings": {
+      "main": [
+        [
+          {
+            "node": "22 — Aggregate Risk Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "22 — Aggregate Risk Summary": {
+      "main": [
+        [
+          {
+            "node": "23 — Calculate Overall Risk Score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "23 — Calculate Overall Risk Score": {
+      "main": [
+        [
+          {
+            "node": "24: Build Executive Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "24: Build Executive Report": {
+      "main": [
+        [
+          {
+            "node": "25 — Generate HTML Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "25 — Generate HTML Report": {
+      "main": [
+        [
+          {
+            "node": "Convert to File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert to File": {
+      "main": [
+        [
+          {
+            "node": "27 — Store Final Report to Google Drive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "27 — Store Final Report to Google Drive": {
+      "main": [
+        [
+          {
+            "node": "28 — Audit Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "28 — Audit Log": {
+      "main": [
+        [
+          {
+            "node": "29 — Prepare Final Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "29 — Prepare Final Response": {
+      "main": [
+        [
+          {
+            "node": "30 — High Risk Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "30 — High Risk Alert": {
+      "main": [
+        [
+          {
+            "node": "31 — Send High Risk Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "34 — Prepare Normal Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "31 — Send High Risk Alert": {
+      "main": [
+        [
+          {
+            "node": "32 — Prepare Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "32 — Prepare Webhook Response": {
+      "main": [
+        [
+          {
+            "node": "33 — Final Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "34 — Prepare Normal Response": {
+      "main": [
+        [
+          {
+            "node": "35 — Return Normal Analysis Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "b58aabc9-b427-4f24-9a56-42127c225d77",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "nodeGroups": [],
+  "id": "puTfGsg5yNFTcw4a",
+  "tags": []
+}
